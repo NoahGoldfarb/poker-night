@@ -51,6 +51,9 @@ export interface GameState {
   createdAt: number;
   updatedAt: number;
   chatMessages: ChatMessage[];
+  // FIX: persist the deck across phases so community cards come from the same deck as hole cards
+  deck: Card[];
+  deckIndex: number;
 }
 
 export interface ChatMessage {
@@ -128,13 +131,13 @@ function evaluateFiveCards(cards: Card[]): { rank: number; name: string; value: 
   const suits = cards.map(c => c.suit);
   const rankCounts: Record<number, number> = {};
   ranks.forEach(r => { rankCounts[r] = (rankCounts[r] || 0) + 1; });
-  
+
   const counts = Object.values(rankCounts).sort((a, b) => b - a);
   const uniqueRanks = Object.keys(rankCounts).map(Number).sort((a, b) => b - a);
-  
+
   const isFlush = suits.every(s => s === suits[0]);
   const isStraight = uniqueRanks.length === 5 && (ranks[0] - ranks[4] === 4);
-  const isLowAceStraight = uniqueRanks.length === 5 && 
+  const isLowAceStraight = uniqueRanks.length === 5 &&
     JSON.stringify(ranks) === JSON.stringify([14, 5, 4, 3, 2]);
 
   if (isFlush && isStraight && ranks[0] === 14) {
@@ -171,11 +174,11 @@ export function getBestHand(holeCards: Card[], communityCards: Card[]): { rank: 
   const allCards = [...holeCards, ...communityCards];
   const combos = getCombinations(allCards, 5);
   let best = { rank: -1, name: '', value: [] as number[] };
-  
+
   for (const combo of combos) {
     const result = evaluateFiveCards(combo);
-    if (result.rank > best.rank || 
-        (result.rank === best.rank && compareArrays(result.value, best.value) > 0)) {
+    if (result.rank > best.rank ||
+      (result.rank === best.rank && compareArrays(result.value, best.value) > 0)) {
       best = result;
     }
   }
@@ -189,11 +192,11 @@ function compareArrays(a: number[], b: number[]): number {
   return 0;
 }
 
-export function determineWinners(players: Player[], communityCards: Card[]): { 
-  playerId: string; amount: number; handName: string 
+export function determineWinners(players: Player[], communityCards: Card[]): {
+  playerId: string; amount: number; handName: string
 }[] {
   const activePlayers = players.filter(p => !p.folded && p.cards.length > 0);
-  
+
   if (activePlayers.length === 1) {
     const totalPot = players.reduce((sum, p) => sum + p.totalBet, 0);
     return [{ playerId: activePlayers[0].id, amount: totalPot, handName: 'Last player standing' }];
@@ -211,9 +214,9 @@ export function determineWinners(players: Player[], communityCards: Card[]): {
 
   const totalPot = players.reduce((sum, p) => sum + p.totalBet, 0);
   const winner = hands[0];
-  
-  return [{ 
-    playerId: winner.player.id, 
+
+  return [{
+    playerId: winner.player.id,
     amount: totalPot,
     handName: winner.hand.name
   }];
@@ -240,22 +243,27 @@ export function createInitialGameState(gameId: string, accessCode: string): Game
     createdAt: Date.now(),
     updatedAt: Date.now(),
     chatMessages: [],
+    deck: [],
+    deckIndex: 0,
   };
 }
 
 export function startNewRound(state: GameState): GameState {
+  // FIX: create ONE deck for the entire round and track position in it
   const deck = createDeck();
+  let deckIndex = 0;
+
   const activePlayers = state.players.filter(p => p.chips > 0 || p.allin);
-  
+
   if (activePlayers.length < 2) return state;
 
   const dealerIndex = (state.dealerIndex + 1) % activePlayers.length;
   const sbIndex = (dealerIndex + 1) % activePlayers.length;
   const bbIndex = (dealerIndex + 2) % activePlayers.length;
 
-  let deckIndex = 0;
   const players = state.players.map(p => ({
     ...p,
+    // Deal 2 cards to each player with chips, from the shared deck
     cards: p.chips > 0 ? [
       { ...deck[deckIndex++] },
       { ...deck[deckIndex++] },
@@ -272,7 +280,7 @@ export function startNewRound(state: GameState): GameState {
   // Post blinds
   const sbPlayer = players[sbIndex];
   const bbPlayer = players[bbIndex];
-  
+
   const sbAmount = Math.min(state.smallBlind, sbPlayer.chips);
   sbPlayer.chips -= sbAmount;
   sbPlayer.bet = sbAmount;
@@ -303,18 +311,21 @@ export function startNewRound(state: GameState): GameState {
     round: state.round + 1,
     winners: undefined,
     updatedAt: Date.now(),
+    // FIX: store deck and current position in state so advancePhase can continue from it
+    deck,
+    deckIndex,
   };
 }
 
 export function processAction(
-  state: GameState, 
-  playerId: string, 
-  action: PlayerAction, 
+  state: GameState,
+  playerId: string,
+  action: PlayerAction,
   raiseAmount?: number
 ): GameState {
   const playerIndex = state.players.findIndex(p => p.id === playerId);
   if (playerIndex === -1 || playerIndex !== state.currentPlayerIndex) return state;
-  
+
   const players = state.players.map(p => ({ ...p }));
   const player = players[playerIndex];
   let pot = state.pot;
@@ -378,7 +389,7 @@ export function processAction(
   // Find next active player
   const activePlayers = players.filter(p => !p.folded && !p.allin);
   let nextIndex = state.currentPlayerIndex;
-  
+
   if (activePlayers.length <= 1 || shouldAdvancePhase(players, currentBet, state.bigBlindIndex, state.currentPlayerIndex, state.phase)) {
     return advancePhase({ ...state, players, pot, currentBet, minRaise, lastAction: { playerId, action, amount: raiseAmount } });
   }
@@ -390,8 +401,8 @@ export function processAction(
     attempts++;
   } while (
     attempts <= players.length &&
-    (players[nextIndex].folded || players[nextIndex].allin || 
-     (players[nextIndex].bet === currentBet && players[nextIndex].lastAction !== undefined && action !== 'raise'))
+    (players[nextIndex].folded || players[nextIndex].allin ||
+      (players[nextIndex].bet === currentBet && players[nextIndex].lastAction !== undefined && action !== 'raise'))
   );
 
   if (attempts > players.length) {
@@ -411,27 +422,27 @@ export function processAction(
 }
 
 function shouldAdvancePhase(
-  players: Player[], 
-  currentBet: number, 
-  bbIndex: number, 
+  players: Player[],
+  currentBet: number,
+  bbIndex: number,
   currentIndex: number,
   phase: GamePhase
 ): boolean {
   const activePlayers = players.filter(p => !p.folded);
   if (activePlayers.length <= 1) return true;
-  
+
   const canActPlayers = activePlayers.filter(p => !p.allin);
   if (canActPlayers.length === 0) return true;
-  
+
   const allBetsEqual = canActPlayers.every(p => p.bet === currentBet);
   const allHaveActed = canActPlayers.every(p => p.lastAction !== undefined);
-  
+
   return allBetsEqual && allHaveActed;
 }
 
 function advancePhase(state: GameState): GameState {
   const activePlayers = state.players.filter(p => !p.folded);
-  
+
   if (activePlayers.length <= 1) {
     return finishRound(state);
   }
@@ -444,15 +455,17 @@ function advancePhase(state: GameState): GameState {
     return finishRound(state);
   }
 
-  const deck = createDeck();
+  // FIX: use the persisted deck and deckIndex instead of creating a new deck
+  const deck = state.deck;
+  let deckIndex = state.deckIndex;
   let communityCards = [...state.communityCards];
-  
+
   if (nextPhase === 'flop') {
-    communityCards = [deck[0], deck[1], deck[2]];
+    communityCards = [deck[deckIndex++], deck[deckIndex++], deck[deckIndex++]];
   } else if (nextPhase === 'turn') {
-    communityCards = [...communityCards, deck[3]];
+    communityCards = [...communityCards, deck[deckIndex++]];
   } else if (nextPhase === 'river') {
-    communityCards = [...communityCards, deck[4]];
+    communityCards = [...communityCards, deck[deckIndex++]];
   }
 
   const players = state.players.map(p => ({
@@ -461,25 +474,34 @@ function advancePhase(state: GameState): GameState {
     lastAction: undefined,
   }));
 
-  const firstActiveIndex = players.findIndex(
-    p => !p.folded && !p.allin
-  );
+  const firstActiveIndex = players.findIndex(p => !p.folded && !p.allin);
 
-  return {
+  const nextState: GameState = {
     ...state,
     phase: nextPhase,
     communityCards,
     players,
     currentBet: 0,
     minRaise: state.bigBlind,
+    // FIX: advance deckIndex so the next phase continues from where we left off
+    deckIndex,
     currentPlayerIndex: firstActiveIndex >= 0 ? firstActiveIndex : 0,
     updatedAt: Date.now(),
   };
+
+  // FIX: if all non-folded players are all-in (no one left to act),
+  // automatically run out the remaining community cards without waiting for input
+  const canActPlayers = players.filter(p => !p.folded && !p.allin);
+  if (canActPlayers.length === 0) {
+    return advancePhase(nextState);
+  }
+
+  return nextState;
 }
 
 function finishRound(state: GameState): GameState {
   const winners = determineWinners(state.players, state.communityCards);
-  
+
   const players = state.players.map(p => {
     const win = winners.find(w => w.playerId === p.id);
     const hand = !p.folded ? getBestHand(p.cards, state.communityCards) : null;
