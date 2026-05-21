@@ -169,6 +169,7 @@ export default function Home() {
               ['⚡', 'Real-time updates'],
               ['💬', 'In-game chat'],
               ['🆓', 'Free, no signup'],
+              [Von Noah G. für Info]
             ].map(([icon, text]) => (
               <div key={text} style={{ background: '#161b22', border: '1px solid #21262d', borderRadius: 10, padding: '10px 14px', color: '#8b949e', fontSize: 13 }}>
                 {icon} {text}
