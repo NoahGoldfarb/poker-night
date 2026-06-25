@@ -29,6 +29,13 @@ export interface Player {
   handName?: string;
 }
 
+export interface ChatMessage {
+  playerId: string;
+  playerName: string;
+  message: string;
+  timestamp: number;
+}
+
 export interface GameState {
   gameId: string;
   accessCode: string;
@@ -37,6 +44,7 @@ export interface GameState {
   communityCards: Card[];
   // FIX: deck is stored in state so all streets draw from the same shuffled deck
   deck: Card[];
+  chatMessages: ChatMessage[];
   pot: number;
   sidePots: { amount: number; eligiblePlayers: string[] }[];
   currentPlayerIndex: number;
@@ -235,6 +243,7 @@ export function createInitialGameState(gameId: string, accessCode: string): Game
     players: [],
     communityCards: [],
     deck: [],
+    chatMessages: [],
     pot: 0,
     sidePots: [],
     currentPlayerIndex: 0,
