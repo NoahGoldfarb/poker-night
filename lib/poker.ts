@@ -35,6 +35,8 @@ export interface GameState {
   phase: GamePhase;
   players: Player[];
   communityCards: Card[];
+  // FIX: deck is stored in state so all streets draw from the same shuffled deck
+  deck: Card[];
   pot: number;
   sidePots: { amount: number; eligiblePlayers: string[] }[];
   currentPlayerIndex: number;
@@ -50,18 +52,6 @@ export interface GameState {
   lastAction?: { playerId: string; action: PlayerAction; amount?: number };
   createdAt: number;
   updatedAt: number;
-  chatMessages: ChatMessage[];
-  // FIX: persist the deck across phases so community cards come from the same deck as hole cards
-  deck: Card[];
-  deckIndex: number;
-}
-
-export interface ChatMessage {
-  playerId: string;
-  playerName: string;
-  message: string;
-  timestamp: number;
-  isSystem?: boolean;
 }
 
 const RANKS: Rank[] = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
@@ -213,12 +203,27 @@ export function determineWinners(players: Player[], communityCards: Card[]): {
   });
 
   const totalPot = players.reduce((sum, p) => sum + p.totalBet, 0);
-  const winner = hands[0];
+
+  // Handle ties: split pot among all players with the same best hand
+  const bestRank = hands[0].hand.rank;
+  const bestValue = hands[0].hand.value;
+  const tiedWinners = hands.filter(
+    h => h.hand.rank === bestRank && compareArrays(h.hand.value, bestValue) === 0
+  );
+
+  if (tiedWinners.length > 1) {
+    const share = Math.floor(totalPot / tiedWinners.length);
+    return tiedWinners.map(w => ({
+      playerId: w.player.id,
+      amount: share,
+      handName: w.hand.name + ' (split)',
+    }));
+  }
 
   return [{
-    playerId: winner.player.id,
+    playerId: hands[0].player.id,
     amount: totalPot,
-    handName: winner.hand.name
+    handName: hands[0].hand.name,
   }];
 }
 
@@ -229,6 +234,7 @@ export function createInitialGameState(gameId: string, accessCode: string): Game
     phase: 'waiting',
     players: [],
     communityCards: [],
+    deck: [],
     pot: 0,
     sidePots: [],
     currentPlayerIndex: 0,
@@ -242,64 +248,66 @@ export function createInitialGameState(gameId: string, accessCode: string): Game
     round: 0,
     createdAt: Date.now(),
     updatedAt: Date.now(),
-    chatMessages: [],
-    deck: [],
-    deckIndex: 0,
   };
 }
 
 export function startNewRound(state: GameState): GameState {
-  // FIX: create ONE deck for the entire round and track position in it
-  const deck = createDeck();
-  let deckIndex = 0;
-
-  const activePlayers = state.players.filter(p => p.chips > 0 || p.allin);
+  // FIX: no direct mutation of state — work on filtered copy
+  const activePlayers = state.players.filter(p => p.chips > 0);
 
   if (activePlayers.length < 2) return state;
+
+  // FIX: shuffle ONE deck for the entire round and store it in state
+  const deck = createDeck();
+  // Deal 2 cards per active player, burn 1 before each street (standard dealing)
+  // We just use the first N*2 cards for hole cards and indices 10+ for community
+  let deckIdx = 0;
 
   const dealerIndex = (state.dealerIndex + 1) % activePlayers.length;
   const sbIndex = (dealerIndex + 1) % activePlayers.length;
   const bbIndex = (dealerIndex + 2) % activePlayers.length;
 
-  const players = state.players.map(p => ({
+  // Rebuild players from activePlayers (removes broke players)
+  const players = activePlayers.map(p => ({
     ...p,
-    // Deal 2 cards to each player with chips, from the shared deck
-    cards: p.chips > 0 ? [
-      { ...deck[deckIndex++] },
-      { ...deck[deckIndex++] },
-    ] : [],
+    cards: [
+      { ...deck[deckIdx++] },
+      { ...deck[deckIdx++] },
+    ],
     bet: 0,
     totalBet: 0,
-    folded: p.chips <= 0,
+    folded: false,
     allin: false,
-    lastAction: undefined,
-    handRank: undefined,
-    handName: undefined,
+    lastAction: undefined as PlayerAction | undefined,
+    handRank: undefined as number | undefined,
+    handName: undefined as string | undefined,
   }));
 
   // Post blinds
-  const sbPlayer = players[sbIndex];
-  const bbPlayer = players[bbIndex];
+  const sbAmount = Math.min(state.smallBlind, players[sbIndex].chips);
+  players[sbIndex].chips -= sbAmount;
+  players[sbIndex].bet = sbAmount;
+  players[sbIndex].totalBet = sbAmount;
+  if (players[sbIndex].chips === 0) players[sbIndex].allin = true;
 
-  const sbAmount = Math.min(state.smallBlind, sbPlayer.chips);
-  sbPlayer.chips -= sbAmount;
-  sbPlayer.bet = sbAmount;
-  sbPlayer.totalBet = sbAmount;
-  if (sbPlayer.chips === 0) sbPlayer.allin = true;
+  const bbAmount = Math.min(state.bigBlind, players[bbIndex].chips);
+  players[bbIndex].chips -= bbAmount;
+  players[bbIndex].bet = bbAmount;
+  players[bbIndex].totalBet = bbAmount;
+  if (players[bbIndex].chips === 0) players[bbIndex].allin = true;
 
-  const bbAmount = Math.min(state.bigBlind, bbPlayer.chips);
-  bbPlayer.chips -= bbAmount;
-  bbPlayer.bet = bbAmount;
-  bbPlayer.totalBet = bbAmount;
-  if (bbPlayer.chips === 0) bbPlayer.allin = true;
+  const firstToAct = (bbIndex + 1) % players.length;
 
-  const firstToAct = (bbIndex + 1) % activePlayers.length;
+  // FIX: store remaining deck starting at community card position (after hole cards dealt)
+  // Community cards: flop at deckIdx, deckIdx+1, deckIdx+2; turn at deckIdx+3; river at deckIdx+4
+  const remainingDeck = deck.slice(deckIdx);
 
   return {
     ...state,
     phase: 'preflop',
     players,
     communityCards: [],
+    deck: remainingDeck,
     pot: sbAmount + bbAmount,
     sidePots: [],
     currentPlayerIndex: firstToAct,
@@ -311,9 +319,6 @@ export function startNewRound(state: GameState): GameState {
     round: state.round + 1,
     winners: undefined,
     updatedAt: Date.now(),
-    // FIX: store deck and current position in state so advancePhase can continue from it
-    deck,
-    deckIndex,
   };
 }
 
@@ -356,15 +361,14 @@ export function processAction(
 
     case 'raise': {
       const amount = raiseAmount || state.minRaise;
-      const totalBetNeeded = amount;
-      const additionalNeeded = totalBetNeeded - player.bet;
+      const additionalNeeded = amount - player.bet;
       const actualAdditional = Math.min(additionalNeeded, player.chips);
       player.chips -= actualAdditional;
       player.bet += actualAdditional;
       player.totalBet += actualAdditional;
       pot += actualAdditional;
       currentBet = player.bet;
-      minRaise = Math.max(minRaise, (amount - state.currentBet) + amount);
+      minRaise = Math.max(state.bigBlind, amount - state.currentBet) + amount;
       player.lastAction = 'raise';
       if (player.chips === 0) player.allin = true;
       break;
@@ -386,47 +390,41 @@ export function processAction(
     }
   }
 
-  // Find next active player
-  const activePlayers = players.filter(p => !p.folded && !p.allin);
-  let nextIndex = state.currentPlayerIndex;
-
-  if (activePlayers.length <= 1 || shouldAdvancePhase(players, currentBet, state.bigBlindIndex, state.currentPlayerIndex, state.phase)) {
-    return advancePhase({ ...state, players, pot, currentBet, minRaise, lastAction: { playerId, action, amount: raiseAmount } });
-  }
-
-  // Find next player who can act
-  let attempts = 0;
-  do {
-    nextIndex = (nextIndex + 1) % players.length;
-    attempts++;
-  } while (
-    attempts <= players.length &&
-    (players[nextIndex].folded || players[nextIndex].allin ||
-      (players[nextIndex].bet === currentBet && players[nextIndex].lastAction !== undefined && action !== 'raise'))
-  );
-
-  if (attempts > players.length) {
-    return advancePhase({ ...state, players, pot, currentBet, minRaise, lastAction: { playerId, action, amount: raiseAmount } });
-  }
-
-  return {
+  const updatedState = {
     ...state,
     players,
     pot,
     currentBet,
     minRaise,
-    currentPlayerIndex: nextIndex,
     lastAction: { playerId, action, amount: raiseAmount },
     updatedAt: Date.now(),
   };
+
+  // Check if we should advance the phase
+  if (shouldAdvancePhase(players, currentBet, state.bigBlindIndex, state.phase, action)) {
+    return advancePhase(updatedState);
+  }
+
+  // Find next active player
+  let nextIndex = playerIndex;
+  let attempts = 0;
+  do {
+    nextIndex = (nextIndex + 1) % players.length;
+    attempts++;
+    if (attempts > players.length) {
+      return advancePhase(updatedState);
+    }
+  } while (players[nextIndex].folded || players[nextIndex].allin);
+
+  return { ...updatedState, currentPlayerIndex: nextIndex };
 }
 
 function shouldAdvancePhase(
   players: Player[],
   currentBet: number,
   bbIndex: number,
-  currentIndex: number,
-  phase: GamePhase
+  phase: GamePhase,
+  lastAction: PlayerAction
 ): boolean {
   const activePlayers = players.filter(p => !p.folded);
   if (activePlayers.length <= 1) return true;
@@ -434,8 +432,13 @@ function shouldAdvancePhase(
   const canActPlayers = activePlayers.filter(p => !p.allin);
   if (canActPlayers.length === 0) return true;
 
+  // Everyone must have acted AND all bets must be equal
   const allBetsEqual = canActPlayers.every(p => p.bet === currentBet);
   const allHaveActed = canActPlayers.every(p => p.lastAction !== undefined);
+
+  // FIX: in preflop, BB gets to act even if everyone just called
+  // This is handled naturally: BB's lastAction is undefined until they act,
+  // so allHaveActed will be false until BB acts.
 
   return allBetsEqual && allHaveActed;
 }
@@ -447,56 +450,55 @@ function advancePhase(state: GameState): GameState {
     return finishRound(state);
   }
 
-  const phaseOrder: GamePhase[] = ['preflop', 'flop', 'turn', 'river', 'showdown'];
+  const phaseOrder: GamePhase[] = ['preflop', 'flop', 'turn', 'river'];
   const currentPhaseIndex = phaseOrder.indexOf(state.phase);
-  const nextPhase = phaseOrder[currentPhaseIndex + 1];
 
-  if (!nextPhase || nextPhase === 'showdown') {
+  // FIX: river is the last betting phase — after river betting ends, go to showdown
+  if (currentPhaseIndex === -1 || currentPhaseIndex >= phaseOrder.length - 1) {
     return finishRound(state);
   }
 
-  // FIX: use the persisted deck and deckIndex instead of creating a new deck
+  const nextPhase = phaseOrder[currentPhaseIndex + 1];
+
+  // FIX: draw community cards from the stored deck, not a new random deck
   const deck = state.deck;
-  let deckIndex = state.deckIndex;
   let communityCards = [...state.communityCards];
 
   if (nextPhase === 'flop') {
-    communityCards = [deck[deckIndex++], deck[deckIndex++], deck[deckIndex++]];
+    communityCards = [deck[0], deck[1], deck[2]];
   } else if (nextPhase === 'turn') {
-    communityCards = [...communityCards, deck[deckIndex++]];
+    communityCards = [...communityCards, deck[3]];
   } else if (nextPhase === 'river') {
-    communityCards = [...communityCards, deck[deckIndex++]];
+    communityCards = [...communityCards, deck[4]];
   }
 
   const players = state.players.map(p => ({
     ...p,
     bet: 0,
-    lastAction: undefined,
+    lastAction: undefined as PlayerAction | undefined,
   }));
 
-  const firstActiveIndex = players.findIndex(p => !p.folded && !p.allin);
+  // First to act post-flop: first active non-folded, non-allin player after dealer
+  const dealerIdx = state.dealerIndex;
+  let firstActiveIndex = -1;
+  for (let i = 1; i <= players.length; i++) {
+    const idx = (dealerIdx + i) % players.length;
+    if (!players[idx].folded && !players[idx].allin) {
+      firstActiveIndex = idx;
+      break;
+    }
+  }
 
-  const nextState: GameState = {
+  return {
     ...state,
     phase: nextPhase,
     communityCards,
     players,
     currentBet: 0,
     minRaise: state.bigBlind,
-    // FIX: advance deckIndex so the next phase continues from where we left off
-    deckIndex,
     currentPlayerIndex: firstActiveIndex >= 0 ? firstActiveIndex : 0,
     updatedAt: Date.now(),
   };
-
-  // FIX: if all non-folded players are all-in (no one left to act),
-  // automatically run out the remaining community cards without waiting for input
-  const canActPlayers = players.filter(p => !p.folded && !p.allin);
-  if (canActPlayers.length === 0) {
-    return advancePhase(nextState);
-  }
-
-  return nextState;
 }
 
 function finishRound(state: GameState): GameState {
@@ -504,7 +506,9 @@ function finishRound(state: GameState): GameState {
 
   const players = state.players.map(p => {
     const win = winners.find(w => w.playerId === p.id);
-    const hand = !p.folded ? getBestHand(p.cards, state.communityCards) : null;
+    const hand = !p.folded && p.cards.length > 0
+      ? getBestHand(p.cards, state.communityCards)
+      : null;
     return {
       ...p,
       chips: p.chips + (win ? win.amount : 0),
